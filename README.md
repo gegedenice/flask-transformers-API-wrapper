@@ -1,92 +1,151 @@
-# Flask Transformers API Wrapper - Deployment Guide
+# Flask Transformers Proxy - Simple API Gateway
 
 ## Overview
-This Flask application provides an OpenAI-compatible API wrapper around HuggingFace Transformers models, allowing you to serve language models remotely without installing them locally.
+This Flask application acts as a **proxy gateway** that automatically launches and manages a `transformers serve` instance, then forwards API requests to it. It's designed to be a lightweight wrapper that makes the HuggingFace Transformers serving API easily accessible through a simple Flask interface.
+
+## Architecture
+```
+Client Request → Flask Proxy (Port 5000) → Transformers Serve (Port 8000)
+```
+
+- **Flask Proxy**: Runs on port 5000, handles HTTP requests and forwards them
+- **Transformers Serve**: Automatically launched on port 8000, handles the actual ML inference
+- **Automatic Management**: The Flask app starts/stops the transformers server automatically
 
 ## Features
-- **Implicit model loading**: Specify model in request, auto-loads if needed
-- OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/completions`)
-- Model discovery via `/v1/models` endpoint
-- Seamless model switching between requests
-- Memory-efficient model management
-- GPU acceleration support
-- Health monitoring
-- Streaming support (basic implementation)
-- Token usage tracking
+- **Automatic Server Launch**: `transformers serve` starts automatically when you run the Flask app
+- **Simple Proxy**: Forwards all requests to the internal transformers server
+- **Health Monitoring**: `/health` endpoint shows connectivity status
+- **Graceful Shutdown**: Automatically cleans up subprocesses on exit
+- **CORS Support**: Built-in CORS handling for web applications
+- **Environment Configuration**: Configurable internal server URL
 
-## User Workflow
-1. **List models**: Call `/v1/models` to see available models
-2. **Make requests**: Use any model name in chat/completion requests
-3. **Auto-loading**: Server automatically loads the specified model
-4. **Seamless switching**: Change models between requests without manual loading
+## Quick Start
 
-## Server Setup
-
-### 1. Prerequisites
+### 1. Install Dependencies
 ```bash
-# Ubuntu/Debian
-sudo apt update
-sudo apt install python3 python3-pip python3-venv git
+# Using uv (recommended)
+uv sync
 
-# For GPU support (optional but recommended)
-# Follow NVIDIA CUDA installation guide for your system
+# Or manually with pip
+pip install flask flask_cors requests transformers[serving] torch accelerate
 ```
 
-### 2. Installation
+### 2. Run the Application
 ```bash
-# Clone or create your project directory
-mkdir transformers-api
-cd transformers-api
+# Using uv (recommanded)
+uv run app.py
 
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 3. Basic Deployment
-
-#### Option A: Development Server
-```bash
-# Start the development server
+# Or
 python app.py
-
-# The API will be available at http://your-server:5000
 ```
 
-#### Option B: Production with Gunicorn
+This will:
+1. Start `transformers serve` on port 8000
+2. Start Flask proxy on port 5000
+3. Make the API available at `http://localhost:5000`
+
+### 3. Test the API
+```bash
+# Health check
+curl http://localhost:5000/health
+
+# Generate text (forwarded to transformers serve)
+curl -X POST http://localhost:5000/generate \
+  -H "Content-Type: application/json" \
+  -d '{"inputs": "Hello, how are you?"}'
+```
+
+## API Endpoints
+
+### `/health` (GET)
+Health check endpoint that verifies both the Flask proxy and the internal transformers server.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "internal_server": "http://localhost:8000",
+  "internal_reachable": true
+}
+```
+
+### `/generate` (POST)
+Proxies POST requests to the internal transformers server's `/generate` endpoint.
+
+**Usage:**
+```bash
+curl -X POST http://localhost:5000/generate \
+  -H "Content-Type: application/json" \
+  -d '{"inputs": "Your prompt here"}'
+```
+
+### `/*` (Catch-all)
+All other paths and HTTP methods are automatically forwarded to the internal transformers server.
+
+## Configuration
+
+### Environment Variables
+```bash
+# Override the internal server URL (default: http://localhost:8000)
+export INTERNAL_SERVER_URL="http://localhost:8000"
+
+# Or set a different port for transformers serve
+export INTERNAL_SERVER_URL="http://localhost:9000"
+```
+
+### Port Configuration
+- **Flask Proxy**: Port 5000 (configurable in `app.py`)
+- **Transformers Serve**: Port 8000 (configurable in `start_transformers_server()`)
+
+## Deployment Options
+
+### Development
+```bash
+python app.py
+```
+
+### Production with Gunicorn
 ```bash
 # Install gunicorn
 pip install gunicorn
 
-# Start production server
-gunicorn --bind 0.0.0.0:5000 --workers 1 --timeout 300 app:app
-
-# For GPU servers, use single worker to avoid memory conflicts
-gunicorn --bind 0.0.0.0:5000 --workers 1 --worker-class sync --timeout 600 app:app
+# Start with gunicorn
+gunicorn --bind 0.0.0.0:5000 --workers 1 app:app
 ```
 
-#### Option C: Using systemd (Linux)
-Create a systemd service file:
+### Docker Deployment
+```dockerfile
+FROM python:3.10-slim
 
-```bash
-sudo nano /etc/systemd/system/transformers-api.service
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY app.py .
+
+EXPOSE 5000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "app:app"]
 ```
 
+### Systemd Service (Linux)
 ```ini
 [Unit]
-Description=Transformers API
+Description=Flask Transformers Proxy
 After=network.target
 
 [Service]
 Type=exec
 User=your-username
-Group=your-group
-WorkingDirectory=/path/to/transformers-api
-Environment=PATH=/path/to/transformers-api/venv/bin
-ExecStart=/path/to/transformers-api/venv/bin/gunicorn --bind 0.0.0.0:5000 --workers 1 --timeout 600 app:app
+WorkingDirectory=/path/to/your/app
+ExecStart=/path/to/venv/bin/python app.py
 Restart=always
 RestartSec=10
 
@@ -94,205 +153,156 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable transformers-api
-sudo systemctl start transformers-api
+## How It Works
+
+### Startup Process
+1. **Check Dependencies**: Verifies `transformers` command is available
+2. **Launch Transformers Serve**: Starts `transformers serve --port 8000` as subprocess
+3. **Wait for Startup**: Waits 3 seconds for server to initialize
+4. **Start Flask**: Launches Flask proxy on port 5000
+5. **Ready**: Both servers are running and ready to handle requests
+
+### Request Flow
+```
+Client → Flask Proxy (5000) → Transformers Serve (8000) → Response
 ```
 
-### 4. Docker Deployment (Recommended for Production)
-
-Create a `Dockerfile`:
-
-```dockerfile
-FROM python:3.10-slim
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Copy requirements first for better caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application
-COPY app.py .
-
-# Create non-root user
-RUN useradd -m -u 1000 apiuser && chown -R apiuser:apiuser /app
-USER apiuser
-
-EXPOSE 5000
-
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "600", "app:app"]
-```
-
-Build and run:
-```bash
-docker build -t transformers-api .
-docker run -p 5000:5000 --gpus all transformers-api  # Add --gpus all for GPU support
-```
-
-### 5. Reverse Proxy with Nginx (Optional)
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # Important for streaming
-        proxy_buffering off;
-        proxy_cache off;
-        
-        # Increase timeouts for model loading
-        proxy_read_timeout 600s;
-        proxy_connect_timeout 600s;
-        proxy_send_timeout 600s;
-    }
-}
-```
-
-## API Usage
-
-### 1. List Available Models
-```bash
-curl http://your-server:5000/v1/models
-```
-
-### 2. Chat Completion (Model Auto-loads)
-```bash
-curl -X POST http://your-server:5000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "microsoft/DialoGPT-small",
-    "messages": [
-      {"role": "user", "content": "Hello, how are you?"}
-    ],
-    "max_tokens": 150,
-    "temperature": 0.7
-  }'
-```
-
-### 3. Text Completion (Model Auto-loads)
-```bash
-curl -X POST http://your-server:5000/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt2",
-    "prompt": "The future of AI is",
-    "max_tokens": 100,
-    "temperature": 0.7
-  }'
-```
-
-### 4. Switch Models Seamlessly
-```bash
-# First request with DialoGPT
-curl -X POST http://your-server:5000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "microsoft/DialoGPT-small", "messages": [{"role": "user", "content": "Hi"}]}'
-
-# Next request with GPT-2 (automatically switches)
-curl -X POST http://your-server:5000/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt2", "prompt": "Hello world"}'
-```
-
-### 5. Health Check
-```bash
-curl http://your-server:5000/health
-```
-
-## Recommended Models
-
-### Small Models (Good for testing)
-- `microsoft/DialoGPT-small` (117M parameters)
-- `distilgpt2` (82M parameters)
-- `gpt2` (124M parameters)
-
-### Medium Models
-- `microsoft/DialoGPT-medium` (345M parameters)
-- `gpt2-medium` (355M parameters)
-
-### Large Models (Require significant GPU memory)
-- `microsoft/DialoGPT-large` (762M parameters)
-- `gpt2-large` (774M parameters)
-- `facebook/opt-1.3b` (1.3B parameters)
-
-## Performance Optimization
-
-### Memory Management
-- Use `torch.float16` for GPU inference (automatically enabled)
-- Only load one model at a time (current implementation)
-- Models are automatically cleared when loading new ones
-
-### GPU Optimization
-- Use CUDA-compatible PyTorch installation
-- Set appropriate GPU memory fraction
-- Consider using model parallelism for large models
-
-### Scaling
-- Use multiple instances behind a load balancer
-- Each instance should run one model to avoid GPU memory conflicts
-- Consider model-specific instances for different use cases
-
-## Security Considerations
-
-1. **Authentication**: Add API key authentication for production
-2. **Rate Limiting**: Implement request rate limiting
-3. **Input Validation**: Validate and sanitize all inputs
-4. **Firewall**: Restrict access to necessary ports only
-5. **HTTPS**: Use SSL/TLS certificates for encrypted communication
-
-## Monitoring
-
-### Health Endpoint
-The `/health` endpoint provides:
-- Service status
-- Current loaded model
-- CUDA availability
-- Basic system info
-
-### Logging
-- All requests and errors are logged
-- Monitor disk space (model downloads can be large)
-- Monitor GPU/CPU usage
-- Track response times
+### Shutdown Process
+1. **Signal Handling**: Catches SIGINT/SIGTERM (Ctrl+C)
+2. **Stop Transformers**: Terminates the subprocess gracefully
+3. **Cleanup**: Ensures all resources are freed
+4. **Exit**: Clean shutdown
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Out of Memory**: Reduce model size or increase system RAM/GPU memory
-2. **CUDA Errors**: Check CUDA installation and PyTorch compatibility
-3. **Model Loading Timeout**: Increase timeout values in configuration
-4. **Slow Responses**: Consider using smaller models or GPU acceleration
-
-### Model Loading Times
-- First load: Downloads model from HuggingFace (can be slow)
-- Subsequent loads: Loads from local cache (faster)
-- Model switching: Previous model is cleared from memory
-
-## Environment Variables
-
-You can configure the application using environment variables:
-
+#### "transformers command not found"
 ```bash
-export CUDA_VISIBLE_DEVICES=0  # Specify GPU device
-export TRANSFORMERS_CACHE=/path/to/cache  # Model cache directory
-export FLASK_ENV=production
+# Install transformers with serving support
+pip install transformers[serving]
 ```
 
-## Client Integration
+#### Port Already in Use
+```bash
+# Check what's using port 8000
+lsof -i :8000
 
-Use the provided Python client or create your own in any language that can make HTTP requests. The API is compatible with OpenAI's client libraries with minor modifications to the base URL.
+# Kill the process or change ports in app.py
+```
+
+#### Transformers Server Fails to Start
+- Check if port 8000 is available
+- Verify transformers[serving] is installed
+- Check system resources (memory, disk space)
+
+### Debug Mode
+```python
+# In app.py, change debug to True for more verbose output
+app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+```
+
+### Manual Server Management
+If you prefer to manage the transformers server separately:
+
+```bash
+# Terminal 1: Start transformers serve
+transformers serve --port 8000
+
+# Terminal 2: Start Flask proxy (set environment variable)
+export INTERNAL_SERVER_URL="http://localhost:8000"
+python app.py
+```
+
+## Performance Considerations
+
+### CPU vs GPU
+- **CPU**: Works fine, slower inference, lower memory usage
+- **GPU**: Faster inference, higher memory usage, requires CUDA setup
+
+### Memory Management
+- Transformers serve handles model loading/unloading
+- Flask proxy is lightweight and adds minimal overhead
+- Monitor memory usage during model loading
+
+### Scaling
+- Run multiple Flask instances behind a load balancer
+- Each instance manages its own transformers serve subprocess
+- Consider using different ports for each instance
+
+## Security Notes
+
+### Production Considerations
+- Add authentication to the Flask proxy
+- Use HTTPS in production
+- Implement rate limiting
+- Restrict network access to necessary ports only
+- Consider running behind a reverse proxy (nginx, Apache)
+
+### Network Security
+- Flask proxy: External access (port 5000)
+- Transformers serve: Internal only (port 8000)
+- Use firewall rules to restrict access
+
+## Monitoring
+
+### Health Checks
+- `/health` endpoint for basic connectivity
+- Monitor subprocess status
+- Check system resources
+
+### Logging
+- Flask logs: HTTP requests and proxy operations
+- Transformers serve logs: Model operations and inference
+- System logs: Process management and errors
+
+## Examples
+
+### Python Client
+```python
+import requests
+
+# Health check
+response = requests.get("http://localhost:5000/health")
+print(response.json())
+
+# Generate text
+data = {"inputs": "Hello, world!"}
+response = requests.post("http://localhost:5000/generate", json=data)
+print(response.json())
+```
+
+### JavaScript/Node.js
+```javascript
+// Health check
+fetch('http://localhost:5000/health')
+  .then(response => response.json())
+  .then(data => console.log(data));
+
+// Generate text
+fetch('http://localhost:5000/generate', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ inputs: 'Hello, world!' })
+})
+.then(response => response.json())
+.then(data => console.log(data));
+```
+
+### cURL Examples
+```bash
+# Health check
+curl http://localhost:5000/health
+
+# Generate text
+curl -X POST http://localhost:5000/generate \
+  -H "Content-Type: application/json" \
+  -d '{"inputs": "The future of AI is"}'
+
+# Any other transformers serve endpoint
+curl http://localhost:5000/models
+```
+
+## License
+
+[Your License Here]

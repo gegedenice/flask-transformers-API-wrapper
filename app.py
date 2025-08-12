@@ -1,12 +1,26 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "flask",
+#     "flask_cors",
+#     "requests",
+#     "transformers[serving]",
+#     "torch",
+#     "accelerate"
+# ]
+# ///
+
 import os
 import subprocess
 import time
 import signal
 import sys
 from flask import Flask, request, jsonify, Response
+from flask_cors import CORS, cross_origin
 import requests
 
 app = Flask(__name__)
+CORS(app)
 
 # The internal server URL where 'transformers serve' is running
 INTERNAL_SERVER_URL = os.environ.get("INTERNAL_SERVER_URL", "http://localhost:8000").rstrip("/")

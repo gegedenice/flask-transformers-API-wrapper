@@ -1,0 +1,7 @@
+flask
+Flask-Cors
+requests
+gunicorn
+transformers[serving]
+torch
+accelerate
