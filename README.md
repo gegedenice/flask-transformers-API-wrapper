@@ -132,7 +132,7 @@ COPY app.py .
 
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "app:app"]
+CMD ["gunicorn", "--bind=0.0.0.0:5000", "--timeout=0", "--workers=2", "app:app"]
 ```
 
 ### Systemd Service (Linux)
@@ -267,7 +267,7 @@ response = requests.get("http://localhost:5000/health")
 print(response.json())
 
 # Generate text
-data = {"inputs": "Hello, world!"}
+data = {"inputs": "Hello, world!", "model": "HuggingFaceTB/SmolLM3-3B"}
 response = requests.post("http://localhost:5000/generate", json=data)
 print(response.json())
 ```
@@ -283,7 +283,7 @@ fetch('http://localhost:5000/health')
 fetch('http://localhost:5000/generate', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ inputs: 'Hello, world!' })
+  body: JSON.stringify({ inputs: 'Hello, world!', 'model': 'HuggingFaceTB/SmolLM3-3B' })
 })
 .then(response => response.json())
 .then(data => console.log(data));
@@ -297,7 +297,7 @@ curl http://localhost:5000/health
 # Generate text
 curl -X POST http://localhost:5000/generate \
   -H "Content-Type: application/json" \
-  -d '{"inputs": "The future of AI is"}'
+  -d '{"inputs": "The future of AI is", "model": "HuggingFaceTB/SmolLM3-3B"}'
 
 # Any other transformers serve endpoint
 curl http://localhost:5000/models
